@@ -1,3 +1,5 @@
+use std::ops::Rem;
+use std::f32::consts::PI;
 use crate::ansi;
 
 #[derive(Clone, Debug)]
@@ -67,9 +69,24 @@ pub enum LrScheduler {
     Drop { start: f32, gamma: f32, drop: usize },
     /// Drop every `step` superbatches by a factor of `gamma`.
     Step { start: f32, gamma: f32, step: usize },
+    /// Drop every `step` superbatches by a factor of `gamma` after warming up for `warmup_batches` superbatches at a modified starting LR of `warmup_lr`.
+    StepWithWarmup { start: f32, gamma: f32, step: usize, warmup_batches: usize, warmup_lr: f32 },
+    /// Drop every `step` superbatches by a factor of `gamma`, resetting every (ciel((# resets) / 2) * step_size) superbatches.
+    CosineAnnealing { start: f32, gamma: f32, step: usize },
 }
 
 impl LrScheduler {
+
+    pub fn get_sdg_step(&self, superbatch: usize, step_size: usize) -> usize {
+        return match superbatch {
+            s if s < (step_size * 1) => step_size * 1,
+            s if s < (step_size * 2) => step_size * 1,
+            s if s < (step_size * 4) => step_size * 2,
+            s if s < (step_size * 8) => step_size * 4,
+            _ => step_size * 8,
+        }
+    }
+
     pub fn lr(&self, superbatch: usize) -> f32 {
         match *self {
             Self::Constant { value } => value,
@@ -84,6 +101,25 @@ impl LrScheduler {
                 let steps = superbatch.saturating_sub(1) / step;
                 start * gamma.powi(steps as i32)
             }
+            Self::StepWithWarmup { start, gamma, step, warmup_batches, warmup_lr } => {
+                if superbatch <= warmup_batches {
+                    let steps = superbatch.saturating_sub(1) / step;
+                    warmup_lr * gamma.powi(steps as i32)
+                }
+                else {
+                    let actual_batch = superbatch - warmup_batches;
+                    let steps = actual_batch.saturating_sub(1) / step;
+                    start * gamma.powi(steps as i32)
+                }
+            }
+            Self::CosineAnnealing { start, gamma, step } => {
+                let sdg_step = self.get_sdg_step(superbatch, step);
+                let decay = gamma.powi(superbatch as i32);
+                let factor = PI * (superbatch.rem(sdg_step) as f32) / sdg_step as f32;
+                let cosine = factor.cos();
+                let min_val = 0.00001;
+                0.5 * start * decay * (1.0 + min_val + cosine)
+            }
         }
     }
 
@@ -96,6 +132,24 @@ impl LrScheduler {
             Self::Step { start, gamma, step } => {
                 format!(
                     "start {} gamma {} drop every {} superbatches",
+                    ansi(start, 31),
+                    ansi(gamma, 31),
+                    ansi(step, 31),
+                )
+            }
+            Self::StepWithWarmup { start, gamma, step, warmup_batches, warmup_lr } => {
+                format!(
+                    "warmup {} for {} superbatches, start {} gamma {} drop every {} superbatches",
+                    ansi(warmup_lr, 31),
+                    ansi(warmup_batches, 31),
+                    ansi(start, 31),
+                    ansi(gamma, 31),
+                    ansi(step, 31),
+                )
+            }
+            Self::CosineAnnealing { start, gamma, step } => {
+                format!(
+                    "start {} gamma {} resets every {} superbatches",
                     ansi(start, 31),
                     ansi(gamma, 31),
                     ansi(step, 31),
